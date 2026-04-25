@@ -322,6 +322,7 @@ select {
   user-select: none;
   border: 1px solid transparent;
   -webkit-tap-highlight-color: transparent;
+  position: relative;
 }
 .blank:hover { opacity: 0.8; }
 .blank.revealed {
@@ -335,6 +336,38 @@ select {
   border: none;
   cursor: default;
   padding: 0;
+}
+/* Word count badge */
+.blank .wc-badge {
+  position: absolute;
+  top: -8px;
+  right: -4px;
+  font-family: 'Cinzel', serif;
+  font-size: 0.5rem;
+  font-weight: 700;
+  background: var(--gold);
+  color: #fff;
+  min-width: 13px;
+  height: 13px;
+  line-height: 13px;
+  text-align: center;
+  border-radius: 7px;
+  padding: 0 2px;
+  pointer-events: none;
+}
+[data-theme="dark"] .blank .wc-badge {
+  background: var(--gold-dim);
+  color: #e8dcc4;
+}
+.blank.revealed .wc-badge,
+.blank.not-hidden .wc-badge { display: none; }
+body:not([data-wc="on"]) .wc-badge { display: none; }
+
+/* Toggle button active state (Sealed Mode, Word Count) */
+.ctrl-btn.toggle-active {
+  background: var(--gold);
+  color: #fff;
+  border-color: var(--gold);
 }
 
 /* ── MOBILE BOTTOM BAR ── */
@@ -442,9 +475,11 @@ select {
       <span class="control-label">Chapter</span>
       <select id="chapterSel"></select>
     </div>
+    <button class="ctrl-btn" id="wordCountToggle">Word Count</button>
     <button class="ctrl-btn" id="revealAll">Reveal All</button>
     <button class="ctrl-btn" id="hideAll">Hide All</button>
     <button class="ctrl-btn theme-toggle" id="themeToggle" title="Toggle light/dark mode">&#9789;</button>
+    <button class="ctrl-btn" id="sealedToggle">Sealed Mode</button>
   </div>
 </div>
 
@@ -508,6 +543,10 @@ let darkMode=false;
 let currentChapterIdx=0;
 let allStates={niv2011:{},niv1984:{},korean:{}};
 let lastPct={niv2011:null,niv1984:null,korean:null};
+let wordCountOn=true;
+let sealedMode=false;
+let preSealedPct=30;
+let preSealedWc=true;
 
 function chs(){return TRANSLATIONS[currentTranslation];}
 function st(){return allStates[currentTranslation];}
@@ -612,11 +651,15 @@ function applyStateToPanel(panel,ci){
 }
 
 function mergeAdjacent(root){
+  const ignorePeriods=globalPct>=100;
   root.querySelectorAll('.verse').forEach(verse=>{
     const kids=Array.from(verse.childNodes);let i=0;
     while(i<kids.length){
       const n=kids[i];
       if(n.nodeType===1&&n.classList.contains('blank')&&!n.classList.contains('not-hidden')&&!n.classList.contains('revealed')){
+        let wordCount=1;
+        // Don't merge if this word ends with a period (unless at 100%)
+        if(!ignorePeriods&&n.textContent.trimEnd().match(/[.!?]$/)){i++;continue;}
         let j=i+1,space='',targets=[];
         while(j<kids.length){
           const nx=kids[j];
@@ -625,9 +668,19 @@ function mergeAdjacent(root){
             n.textContent+=space+nx.textContent;
             const ex=n.dataset.words||(n.dataset.v+'-'+n.dataset.w);
             n.dataset.words=ex+','+nx.dataset.v+'-'+nx.dataset.w;
+            wordCount++;
             targets.push(nx);targets.forEach(t=>t.remove());
             targets=[];space='';kids.splice(i+1,j-i);j=i+1;
+            // Stop merging if the newly added word ends with a period (unless at 100%)
+            if(!ignorePeriods&&nx.textContent.trimEnd().match(/[.!?]$/))break;
           }else break;
+        }
+        // Add word count badge if more than 1 word
+        if(wordCount>1){
+          const badge=document.createElement('span');
+          badge.className='wc-badge';
+          badge.textContent=wordCount;
+          n.appendChild(badge);
         }
       }
       i++;
@@ -851,7 +904,39 @@ function init(){
   };
 
   applyTheme();
+  applyWordCount();
+  applySealedMode();
   document.getElementById('themeToggle').onclick=()=>{darkMode=!darkMode;applyTheme();debounceSave(true);};
+
+  document.getElementById('wordCountToggle').onclick=()=>{
+    wordCountOn=!wordCountOn;
+    applyWordCount();
+    debounceSave(true);
+  };
+
+  document.getElementById('sealedToggle').onclick=()=>{
+    sealedMode=!sealedMode;
+    if(sealedMode){
+      // Store current settings before sealing
+      preSealedPct=globalPct;
+      preSealedWc=wordCountOn;
+      globalPct=100;
+      wordCountOn=false;
+      document.getElementById('globalPct').value=100;
+    }else{
+      // Revert to pre-sealed settings
+      globalPct=preSealedPct;
+      wordCountOn=preSealedWc;
+      document.getElementById('globalPct').value=globalPct;
+    }
+    // Re-randomise all chapters at new percentage
+    chs().forEach((_,ci)=>{const h=selectHidden(ci,globalPct);st()[ci]={hiddenSet:h,revealedSet:new Set()};});
+    lastPct[currentTranslation]=globalPct;
+    applyWordCount();
+    applySealedMode();
+    buildAllChapters();
+    debounceSave(true);
+  };
 
   document.getElementById('revealAll').onclick=()=>{
     chs().forEach((_,ci)=>{const s=st()[ci];if(s)s.hiddenSet.forEach(k=>s.revealedSet.add(k));});
@@ -889,13 +974,24 @@ function applyTheme(){
   document.getElementById('themeToggle').textContent=darkMode?'\u2600':'\u263D';
 }
 
+function applyWordCount(){
+  document.body.setAttribute('data-wc',wordCountOn?'on':'off');
+  const btn=document.getElementById('wordCountToggle');
+  btn.classList.toggle('toggle-active',wordCountOn);
+}
+
+function applySealedMode(){
+  const btn=document.getElementById('sealedToggle');
+  btn.classList.toggle('toggle-active',sealedMode);
+}
+
 // ── Save / Load ──
 let saveTimer=null;
 function debounceSave(showIndicator){clearTimeout(saveTimer);saveTimer=setTimeout(()=>saveState(showIndicator),500);}
 
 function saveState(showIndicator){
   try{
-    const d={v:3,t:currentTranslation,p:globalPct,dk:darkMode,ci:currentChapterIdx,lp:lastPct,s:{}};
+    const d={v:4,t:currentTranslation,p:globalPct,dk:darkMode,ci:currentChapterIdx,lp:lastPct,wc:wordCountOn,sm:sealedMode,sp:preSealedPct,sw:preSealedWc,s:{}};
     for(const tk in allStates){d.s[tk]={};for(const ci in allStates[tk]){d.s[tk][ci]={h:Array.from(allStates[tk][ci].hiddenSet),r:Array.from(allStates[tk][ci].revealedSet)};}}
     localStorage.setItem('thirteenPages',JSON.stringify(d));
     if(showIndicator){const el=document.getElementById('saveIndicator');el.classList.add('show');setTimeout(()=>el.classList.remove('show'),1200);}
@@ -906,12 +1002,16 @@ function loadState(){
   try{
     const raw=localStorage.getItem('thirteenPages')||localStorage.getItem('heavenlyExamBuddy');if(!raw)return;
     const d=JSON.parse(raw);
-    if(d.v===3){
+    if(d.v===4||d.v===3){
       if(d.t)currentTranslation=d.t;
       if(d.p)globalPct=d.p;
       if(d.dk!==undefined)darkMode=d.dk;
       if(d.ci!==undefined)currentChapterIdx=d.ci;
       if(d.lp){lastPct.niv2011=d.lp.niv2011??null;lastPct.niv1984=d.lp.niv1984??null;lastPct.korean=d.lp.korean??null;}
+      if(d.wc!==undefined)wordCountOn=d.wc;
+      if(d.sm!==undefined)sealedMode=d.sm;
+      if(d.sp!==undefined)preSealedPct=d.sp;
+      if(d.sw!==undefined)preSealedWc=d.sw;
       if(d.s)for(const tk in d.s){if(!allStates[tk])allStates[tk]={};for(const ci in d.s[tk]){allStates[tk][parseInt(ci)]={hiddenSet:new Set(d.s[tk][ci].h),revealedSet:new Set(d.s[tk][ci].r)};}}
     }else if(d.v===2){
       if(d.translation)currentTranslation=d.translation;
